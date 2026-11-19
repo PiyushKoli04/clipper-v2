@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: clipper-v2-dashboard
+    env: docker
+    plan: free
+    region: oregon
+    healthCheckPath: /healthz
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: ALLOWED_EMAIL
+        sync: false
+      - key: FIREBASE_SA_JSON
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FIREBASE_WEB_CONFIG
+        sync: false
+      - key: DEV_MODE
+        value: "false"
+

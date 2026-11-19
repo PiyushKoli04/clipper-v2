@@ -1,0 +1,9 @@
+# Clipper v2 — Worker dependencies (GitHub Actions)
+yt-dlp>=2024.0
+httpx>=0.27
+Pillow>=10.0
+faster-whisper>=1.0.0
+# firebase-admin  — added in Step 2
+# boto3           — added in Step 2
+# instagrapi      — added in Step 5
+
