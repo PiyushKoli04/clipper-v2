@@ -19,27 +19,31 @@ def list_jobs_endpoint(limit: int = 50, user: dict = Depends(get_current_user)):
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_job_endpoint(payload: JobCreateRequest, user: dict = Depends(get_current_user)):
     """Create a new clipping job and optionally trigger the GitHub Action worker."""
-    job_id = str(uuid.uuid4())
-    job_data = {
-        "source_url": payload.source_url,
-        "status": "queued",
-        "stage": "queued",
-        "error": None,
-        "overrides": payload.overrides.model_dump(exclude_none=True) if payload.overrides else {},
-        "github_run_url": None,
-    }
-    firestore.create_job(job_id, job_data)
+    try:
+        job_id = str(uuid.uuid4())
+        job_data = {
+            "source_url": payload.source_url,
+            "status": "queued",
+            "stage": "queued",
+            "error": None,
+            "overrides": payload.overrides.model_dump(exclude_none=True) if payload.overrides else {},
+            "github_run_url": None,
+        }
+        firestore.create_job(job_id, job_data)
 
-    dispatch_res = None
-    if payload.run_now:
-        dispatch_res = await trigger_workflow(job_id)
+        dispatch_res = None
+        if payload.run_now:
+            dispatch_res = await trigger_workflow(job_id)
 
-    return {
-        "id": job_id,
-        "status": "queued",
-        "dispatched": dispatch_res,
-        "message": "Job created",
-    }
+        return {
+            "id": job_id,
+            "status": "queued",
+            "dispatched": dispatch_res,
+            "message": "Job created",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create job: {str(e)}")
+
 
 
 @router.post("/{job_id}/run")

@@ -61,7 +61,10 @@ export const api = {
       headers: getHeaders(),
       body: JSON.stringify({ source_url, overrides, run_now }),
     });
-    if (!res.ok) throw new Error('Failed to create job');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to create job');
+    }
     return res.json();
   },
 

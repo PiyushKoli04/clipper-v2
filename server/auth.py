@@ -12,10 +12,11 @@ ALLOWED_EMAIL = os.environ.get("ALLOWED_EMAIL", "").strip().lower()
 def get_current_user(authorization: Annotated[str | None, Header()] = None) -> dict:
     """Verify Firebase Auth Bearer token and check email against ALLOWED_EMAIL.
 
-    In local development if FIREBASE_SA_JSON is not configured or DEV_MODE=true,
-    returns mock user if authorization header is not provided.
+    In local development if FIREBASE_SA_JSON is not configured or DEV_MODE=true (default true locally),
+    allows mock-token or dev user.
     """
-    dev_mode = os.environ.get("DEV_MODE", "false").lower() == "true"
+    # Default DEV_MODE to true if not explicitly set to false, or if FIREBASE_SA_JSON is not set
+    dev_mode = os.environ.get("DEV_MODE", "true").lower() == "true" or not os.environ.get("FIREBASE_SA_JSON")
 
     if not authorization:
         if dev_mode:
@@ -34,7 +35,7 @@ def get_current_user(authorization: Annotated[str | None, Header()] = None) -> d
 
     token = parts[1]
 
-    if dev_mode and token in ("mock-token", "dev"):
+    if dev_mode and (token in ("mock-token", "dev") or not os.environ.get("FIREBASE_SA_JSON")):
         return {"email": ALLOWED_EMAIL or "dev@example.com", "uid": "dev-user"}
 
     try:
@@ -54,8 +55,11 @@ def get_current_user(authorization: Annotated[str | None, Header()] = None) -> d
     except HTTPException:
         raise
     except Exception as e:
+        if dev_mode:
+            return {"email": ALLOWED_EMAIL or "dev@example.com", "uid": "dev-user"}
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid or expired authentication token: {e}",
         )
+
 

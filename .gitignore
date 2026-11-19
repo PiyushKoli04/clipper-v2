@@ -6,7 +6,7 @@
 *.key
 serviceAccount*.json
 firebase-key*.json
-
+service-account.json
 # Python
 __pycache__/
 *.py[cod]

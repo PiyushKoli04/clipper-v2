@@ -10,6 +10,16 @@ import {
 } from 'firebase/auth';
 import { api, setAuthToken } from '../api/client';
 
+const FALLBACK_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyD6u4nLxVQeVwZa31sg8rwApmJ52Woyu1U",
+  authDomain: "clipper-v.firebaseapp.com",
+  projectId: "clipper-v",
+  storageBucket: "clipper-v.firebasestorage.app",
+  messagingSenderId: "9527946121",
+  appId: "1:9527946121:web:0f7e59f7a0ad1b44968f58",
+  measurementId: "G-XW9QLRPC1D",
+};
+
 interface AuthContextType {
   user: User | null;
   loading: boolean;
@@ -22,9 +32,9 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
   user: null,
   loading: true,
-  signInWithGoogle: async () => {},
-  devSignIn: () => {},
-  signOut: async () => {},
+  signInWithGoogle: async () => { },
+  devSignIn: () => { },
+  signOut: async () => { },
   isDev: false,
 });
 
@@ -34,12 +44,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isDev, setIsDev] = useState(false);
 
   useEffect(() => {
-    let unsubscribe = () => {};
+    let unsubscribe = () => { };
 
     const initAuth = async () => {
       try {
         const publicConfig = await api.getPublicConfig();
-        const fbConfig = publicConfig.firebase;
+        const fbConfig = (publicConfig.firebase && publicConfig.firebase.apiKey)
+          ? publicConfig.firebase
+          : FALLBACK_FIREBASE_CONFIG;
 
         if (fbConfig && fbConfig.apiKey) {
           const app = getApps().length === 0 ? initializeApp(fbConfig) : getApps()[0];

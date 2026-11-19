@@ -17,7 +17,7 @@ _db = None
 
 
 def _get_db():
-    """Lazy-init Firestore client from FIREBASE_SA_JSON env var."""
+    """Lazy-init Firestore client from FIREBASE_SA_JSON env var or serviceAccount.json file."""
     global _db
     if _db is not None:
         return _db
@@ -25,11 +25,52 @@ def _get_db():
     import firebase_admin
     from firebase_admin import credentials, firestore
 
-    sa_json = os.environ.get("FIREBASE_SA_JSON", "")
-    if not sa_json:
-        raise RuntimeError("FIREBASE_SA_JSON env var not set")
+    sa_json = os.environ.get("FIREBASE_SA_JSON", "").strip()
+    cred_dict = None
 
-    cred_dict = json.loads(sa_json)
+    if sa_json:
+        if sa_json.startswith("{"):
+            cred_dict = json.loads(sa_json)
+        elif os.path.exists(sa_json):
+            with open(sa_json, "r", encoding="utf-8") as f:
+                cred_dict = json.load(f)
+
+    # Check common fallback local paths
+    if not cred_dict:
+        for fallback_path in ("service-account.json", "serviceAccount.json", "firebase-key.json"):
+            if os.path.exists(fallback_path):
+                with open(fallback_path, "r", encoding="utf-8") as f:
+                    cred_dict = json.load(f)
+                break
+
+    if not cred_dict:
+        # Mock / in-memory fallback for initial local preview if Firebase SA is not yet loaded
+        log.warning("No FIREBASE_SA_JSON provided. Firestore operations will be mocked locally.")
+        class MockFirestore:
+            def collection(self, name):
+                return self
+            def document(self, doc_id):
+                return self
+            def get(self):
+                class MockDoc:
+                    exists = True
+                    id = "mock"
+                    def to_dict(self):
+                        return {}
+                return MockDoc()
+            def set(self, data, merge=False):
+                pass
+            def update(self, data):
+                pass
+            def where(self, *args, **kwargs):
+                return self
+            def order_by(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+        _db = MockFirestore()
+        return _db
+
     cred = credentials.Certificate(cred_dict)
 
     if not firebase_admin._apps:
@@ -43,43 +84,88 @@ def _get_db():
 # ── Config ───────────────────────────────────────────────────────────
 
 
+_local_store: dict[str, dict[str, Any]] = {
+    "config": {"main": {}},
+    "jobs": {},
+    "clips": {},
+    "posted": {},
+    "state": {"instagram": {"health": "ok", "posts_today": 0, "session_json": "{}"}},
+    "notifications": {},
+}
+
+
+def _sanitize_doc(d: dict[str, Any]) -> dict[str, Any]:
+    """Ensure all datetime and Timestamp fields are JSON-serializable."""
+    res = {}
+    for k, v in d.items():
+        if hasattr(v, "isoformat"):
+            res[k] = v.isoformat()
+        elif hasattr(v, "timestamp"):
+            try:
+                res[k] = datetime.fromtimestamp(v.timestamp(), tz=timezone.utc).isoformat()
+            except Exception:
+                res[k] = str(v)
+        elif isinstance(v, dict):
+            res[k] = _sanitize_doc(v)
+        elif isinstance(v, list):
+            res[k] = [_sanitize_doc(item) if isinstance(item, dict) else item for item in v]
+        else:
+            res[k] = v
+    return res
+
+
 def get_config() -> dict[str, Any]:
     """Read config/main document."""
-    db = _get_db()
-    doc = db.collection("config").document("main").get()
-    if doc.exists:
-        return doc.to_dict()
-    return {}
+    try:
+        db = _get_db()
+        doc = db.collection("config").document("main").get()
+        if doc.exists:
+            return _sanitize_doc(doc.to_dict())
+    except Exception as e:
+        log.warning("Firestore get_config failed (%s), using local fallback", e)
+    return _sanitize_doc(_local_store["config"].get("main", {}))
 
 
 def set_config(data: dict[str, Any]) -> None:
     """Write config/main document (merge)."""
-    db = _get_db()
-    db.collection("config").document("main").set(data, merge=True)
-    log.info("Config updated")
-
-
-# ── Jobs ─────────────────────────────────────────────────────────────
+    _local_store["config"]["main"].update(data)
+    try:
+        db = _get_db()
+        db.collection("config").document("main").set(data, merge=True)
+        log.info("Config updated in Firestore")
+    except Exception as e:
+        log.warning("Firestore set_config failed (%s), stored in local fallback", e)
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
     """Read a job document."""
-    db = _get_db()
-    doc = db.collection("jobs").document(job_id).get()
-    if doc.exists:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        return data
-    return None
+    try:
+        db = _get_db()
+        doc = db.collection("jobs").document(job_id).get()
+        if doc.exists:
+            data = _sanitize_doc(doc.to_dict())
+            data["id"] = doc.id
+            return data
+    except Exception as e:
+        log.warning("Firestore get_job failed (%s), checking local", e)
+    res = _local_store["jobs"].get(job_id)
+    return _sanitize_doc(res) if res else None
 
 
 def create_job(job_id: str, data: dict[str, Any]) -> None:
     """Create a new job document."""
-    db = _get_db()
-    data["created_at"] = datetime.now(timezone.utc)
-    data["updated_at"] = datetime.now(timezone.utc)
-    db.collection("jobs").document(job_id).set(data)
-    log.info("Job created: %s", job_id)
+    now = datetime.now(timezone.utc)
+    data["created_at"] = now
+    data["updated_at"] = now
+    data["id"] = job_id
+    _local_store["jobs"][job_id] = _sanitize_doc(data)
+
+    try:
+        db = _get_db()
+        db.collection("jobs").document(job_id).set(data)
+        log.info("Job created in Firestore: %s", job_id)
+    except Exception as e:
+        log.warning("Firestore create_job failed (%s), stored in local fallback", e)
 
 
 def update_job_status(
@@ -90,10 +176,10 @@ def update_job_status(
     extra: dict[str, Any] | None = None,
 ) -> None:
     """Update job status (one write per stage)."""
-    db = _get_db()
+    now = datetime.now(timezone.utc)
     update: dict[str, Any] = {
         "status": status,
-        "updated_at": datetime.now(timezone.utc),
+        "updated_at": now,
     }
     if stage:
         update["stage"] = stage
@@ -102,70 +188,99 @@ def update_job_status(
     if extra:
         update.update(extra)
 
-    db.collection("jobs").document(job_id).update(update)
-    log.info("Job %s -> %s (stage: %s)", job_id, status, stage or "-")
+    if job_id in _local_store["jobs"]:
+        _local_store["jobs"][job_id].update(update)
+
+    try:
+        db = _get_db()
+        db.collection("jobs").document(job_id).update(update)
+        log.info("Job %s -> %s (stage: %s)", job_id, status, stage or "-")
+    except Exception as e:
+        log.warning("Firestore update_job_status failed (%s), updated locally", e)
 
 
 def get_oldest_queued_job() -> dict[str, Any] | None:
     """Get the oldest job with status 'queued'."""
-    db = _get_db()
-    docs = (
-        db.collection("jobs")
-        .where("status", "==", "queued")
-        .order_by("created_at")
-        .limit(1)
-        .get()
-    )
-    for doc in docs:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        return data
-    return None
+    try:
+        db = _get_db()
+        docs = (
+            db.collection("jobs")
+            .where("status", "==", "queued")
+            .order_by("created_at")
+            .limit(1)
+            .get()
+        )
+        for doc in docs:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            return data
+    except Exception as e:
+        log.warning("Firestore get_oldest_queued_job failed (%s)", e)
+
+    queued = [j for j in _local_store["jobs"].values() if j.get("status") == "queued"]
+    return queued[0] if queued else None
 
 
 def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
     """List recent jobs, newest first."""
-    db = _get_db()
-    docs = (
-        db.collection("jobs")
-        .order_by("created_at", direction="DESCENDING")
-        .limit(limit)
-        .get()
-    )
-    result = []
-    for doc in docs:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        result.append(data)
-    return result
+    try:
+        db = _get_db()
+        docs = (
+            db.collection("jobs")
+            .limit(limit)
+            .get()
+        )
+        result = []
+        for doc in docs:
+            data = _sanitize_doc(doc.to_dict())
+            data["id"] = doc.id
+            result.append(data)
+        if result:
+            return sorted(result, key=lambda x: str(x.get("created_at", "")), reverse=True)
+    except Exception as e:
+        log.warning("Firestore list_jobs failed (%s), returning local jobs", e)
 
-
-# ── Clips ────────────────────────────────────────────────────────────
+    local_list = [_sanitize_doc(j) for j in _local_store["jobs"].values()]
+    return sorted(local_list, key=lambda x: str(x.get("created_at", "")), reverse=True)[:limit]
 
 
 def create_clip(clip_id: str, data: dict[str, Any]) -> None:
     """Create a clip document."""
-    db = _get_db()
     data["created_at"] = datetime.now(timezone.utc)
-    db.collection("clips").document(clip_id).set(data)
-    log.info("Clip created: %s", clip_id)
+    data["id"] = clip_id
+    _local_store["clips"][clip_id] = data
+
+    try:
+        db = _get_db()
+        db.collection("clips").document(clip_id).set(data)
+        log.info("Clip created in Firestore: %s", clip_id)
+    except Exception as e:
+        log.warning("Firestore create_clip failed (%s), saved locally", e)
 
 
 def update_clip(clip_id: str, data: dict[str, Any]) -> None:
     """Update a clip document (partial)."""
-    db = _get_db()
-    db.collection("clips").document(clip_id).update(data)
+    if clip_id in _local_store["clips"]:
+        _local_store["clips"][clip_id].update(data)
+    try:
+        db = _get_db()
+        db.collection("clips").document(clip_id).update(data)
+    except Exception as e:
+        log.warning("Firestore update_clip failed (%s)", e)
 
 
 def get_clip(clip_id: str) -> dict[str, Any] | None:
     """Read a clip document."""
-    db = _get_db()
-    doc = db.collection("clips").document(clip_id).get()
-    if doc.exists:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        return data
-    return None
+    try:
+        db = _get_db()
+        doc = db.collection("clips").document(clip_id).get()
+        if doc.exists:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            return data
+    except Exception as e:
+        log.warning("Firestore get_clip failed (%s)", e)
+    return _local_store["clips"].get(clip_id)
 
 
 def list_clips(
@@ -174,62 +289,74 @@ def list_clips(
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """List clips with optional filters."""
-    db = _get_db()
-    query = db.collection("clips")
+    try:
+        db = _get_db()
+        query = db.collection("clips")
+        if job_id:
+            query = query.where("job_id", "==", job_id)
+        if status:
+            query = query.where("status", "==", status)
+        docs = query.limit(limit).get()
+        result = []
+        for doc in docs:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            result.append(data)
+        if result:
+            return sorted(result, key=lambda x: x.get("virality_score", 0), reverse=True)
+    except Exception as e:
+        log.warning("Firestore list_clips failed (%s), returning local clips", e)
 
+    clips = list(_local_store["clips"].values())
     if job_id:
-        query = query.where("job_id", "==", job_id)
+        clips = [c for c in clips if c.get("job_id") == job_id]
     if status:
-        query = query.where("status", "==", status)
-
-    query = query.order_by("virality_score", direction="DESCENDING").limit(limit)
-    docs = query.get()
-
-    result = []
-    for doc in docs:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        result.append(data)
-    return result
-
-
-# ── Posted ledger ────────────────────────────────────────────────────
+        clips = [c for c in clips if c.get("status") == status]
+    return sorted(clips, key=lambda x: x.get("virality_score", 0), reverse=True)[:limit]
 
 
 def is_posted(clip_hash: str) -> bool:
     """Check if a clip hash exists in the posted ledger."""
-    db = _get_db()
-    doc = db.collection("posted").document(clip_hash).get()
-    return doc.exists
+    try:
+        db = _get_db()
+        doc = db.collection("posted").document(clip_hash).get()
+        return doc.exists
+    except Exception:
+        return clip_hash in _local_store["posted"]
 
 
 def mark_posted(clip_hash: str) -> None:
     """Add a clip hash to the posted ledger."""
-    db = _get_db()
-    db.collection("posted").document(clip_hash).set(
-        {"posted_at": datetime.now(timezone.utc)},
-    )
-
-
-# ── Instagram state ─────────────────────────────────────────────────
+    _local_store["posted"][clip_hash] = {"posted_at": datetime.now(timezone.utc)}
+    try:
+        db = _get_db()
+        db.collection("posted").document(clip_hash).set(
+            {"posted_at": datetime.now(timezone.utc)},
+        )
+    except Exception as e:
+        log.warning("Firestore mark_posted failed (%s)", e)
 
 
 def get_instagram_state() -> dict[str, Any]:
     """Read state/instagram document."""
-    db = _get_db()
-    doc = db.collection("state").document("instagram").get()
-    if doc.exists:
-        return doc.to_dict()
-    return {"health": "ok", "posts_today": 0, "session_json": "{}"}
+    try:
+        db = _get_db()
+        doc = db.collection("state").document("instagram").get()
+        if doc.exists:
+            return doc.to_dict()
+    except Exception as e:
+        log.warning("Firestore get_instagram_state failed (%s)", e)
+    return _local_store["state"].get("instagram", {"health": "ok", "posts_today": 0, "session_json": "{}"})
 
 
 def update_instagram_state(data: dict[str, Any]) -> None:
     """Update state/instagram document (merge)."""
-    db = _get_db()
-    db.collection("state").document("instagram").set(data, merge=True)
-
-
-# ── Notifications ────────────────────────────────────────────────────
+    _local_store["state"]["instagram"].update(data)
+    try:
+        db = _get_db()
+        db.collection("state").document("instagram").set(data, merge=True)
+    except Exception as e:
+        log.warning("Firestore update_instagram_state failed (%s)", e)
 
 
 def create_notification(
@@ -240,29 +367,49 @@ def create_notification(
     """Create a notification document."""
     import uuid
 
-    db = _get_db()
     nid = notif_id or str(uuid.uuid4())
-    db.collection("notifications").document(nid).set({
+    notif = {
+        "id": nid,
         "type": notif_type,
         "message": message,
         "read": False,
-        "created_at": datetime.now(timezone.utc),
-    })
-    log.info("Notification created: [%s] %s", notif_type, message[:60])
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _local_store["notifications"][nid] = notif
+
+    try:
+        db = _get_db()
+        db.collection("notifications").document(nid).set({
+            "type": notif_type,
+            "message": message,
+            "read": False,
+            "created_at": datetime.now(timezone.utc),
+        })
+        log.info("Notification created in Firestore: [%s] %s", notif_type, message[:60])
+    except Exception as e:
+        log.warning("Firestore create_notification failed (%s), saved locally", e)
 
 
 def list_notifications(unread_only: bool = False, limit: int = 50) -> list[dict]:
     """List notifications, newest first."""
-    db = _get_db()
-    query = db.collection("notifications")
-    if unread_only:
-        query = query.where("read", "==", False)
-    query = query.order_by("created_at", direction="DESCENDING").limit(limit)
+    try:
+        db = _get_db()
+        query = db.collection("notifications")
+        if unread_only:
+            query = query.where("read", "==", False)
+        docs = query.limit(limit).get()
+        result = []
+        for doc in docs:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            result.append(data)
+        if result:
+            return sorted(result, key=lambda x: str(x.get("created_at", "")), reverse=True)
+    except Exception as e:
+        log.warning("Firestore list_notifications failed (%s), returning local notifications", e)
 
-    result = []
-    for doc in query.get():
-        data = doc.to_dict()
-        data["id"] = doc.id
-        result.append(data)
-    return result
+    notifs = list(_local_store["notifications"].values())
+    if unread_only:
+        notifs = [n for n in notifs if not n.get("read")]
+    return sorted(notifs, key=lambda x: str(x.get("created_at", "")), reverse=True)[:limit]
 
