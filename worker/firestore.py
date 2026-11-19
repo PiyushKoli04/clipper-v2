@@ -17,7 +17,7 @@ _db = None
 
 
 def _get_db():
-    """Lazy-init Firestore client from FIREBASE_SA_JSON env var or serviceAccount.json file."""
+    """Lazy-init Firestore client from FIREBASE_SA_JSON env var or service-account.json."""
     global _db
     if _db is not None:
         return _db
@@ -25,51 +25,36 @@ def _get_db():
     import firebase_admin
     from firebase_admin import credentials, firestore
 
-    sa_json = os.environ.get("FIREBASE_SA_JSON", "").strip()
+    sa_raw = os.environ.get("FIREBASE_SA_JSON", "").strip()
+    # Strip wrapping quotes if any
+    if (sa_raw.startswith("'") and sa_raw.endswith("'")) or (sa_raw.startswith('"') and sa_raw.endswith('"')):
+        sa_raw = sa_raw[1:-1].strip()
+
     cred_dict = None
 
-    if sa_json:
-        if sa_json.startswith("{"):
-            cred_dict = json.loads(sa_json)
-        elif os.path.exists(sa_json):
-            with open(sa_json, "r", encoding="utf-8") as f:
+    if sa_raw:
+        if sa_raw.startswith("{"):
+            try:
+                cred_dict = json.loads(sa_raw)
+            except Exception as e:
+                log.error("Failed to parse FIREBASE_SA_JSON string: %s", e)
+        elif os.path.exists(sa_raw):
+            with open(sa_raw, "r", encoding="utf-8") as f:
                 cred_dict = json.load(f)
 
-    # Check common fallback local paths
+    # Check local service-account.json in root
     if not cred_dict:
-        for fallback_path in ("service-account.json", "serviceAccount.json", "firebase-key.json"):
-            if os.path.exists(fallback_path):
-                with open(fallback_path, "r", encoding="utf-8") as f:
+        root_dir = Path(__file__).resolve().parent.parent
+        for fname in ("service-account.json", "serviceAccount.json", "firebase-key.json"):
+            cand = root_dir / fname
+            if cand.exists():
+                log.info("Found local service account file: %s", cand)
+                with open(cand, "r", encoding="utf-8") as f:
                     cred_dict = json.load(f)
                 break
 
     if not cred_dict:
-        # Mock / in-memory fallback for initial local preview if Firebase SA is not yet loaded
-        log.warning("No FIREBASE_SA_JSON provided. Firestore operations will be mocked locally.")
-        class MockFirestore:
-            def collection(self, name):
-                return self
-            def document(self, doc_id):
-                return self
-            def get(self):
-                class MockDoc:
-                    exists = True
-                    id = "mock"
-                    def to_dict(self):
-                        return {}
-                return MockDoc()
-            def set(self, data, merge=False):
-                pass
-            def update(self, data):
-                pass
-            def where(self, *args, **kwargs):
-                return self
-            def order_by(self, *args, **kwargs):
-                return self
-            def limit(self, *args, **kwargs):
-                return self
-        _db = MockFirestore()
-        return _db
+        raise RuntimeError("No valid Firebase service account found. Set FIREBASE_SA_JSON or provide service-account.json")
 
     cred = credentials.Certificate(cred_dict)
 
@@ -77,7 +62,7 @@ def _get_db():
         firebase_admin.initialize_app(cred)
 
     _db = firestore.client()
-    log.info("Firestore client initialized")
+    log.info("Firestore client successfully connected to project: %s", cred_dict.get("project_id"))
     return _db
 
 
@@ -160,12 +145,9 @@ def create_job(job_id: str, data: dict[str, Any]) -> None:
     data["id"] = job_id
     _local_store["jobs"][job_id] = _sanitize_doc(data)
 
-    try:
-        db = _get_db()
-        db.collection("jobs").document(job_id).set(data)
-        log.info("Job created in Firestore: %s", job_id)
-    except Exception as e:
-        log.warning("Firestore create_job failed (%s), stored in local fallback", e)
+    db = _get_db()
+    db.collection("jobs").document(job_id).set(data)
+    log.info("Job successfully created in Firestore: %s", job_id)
 
 
 def update_job_status(

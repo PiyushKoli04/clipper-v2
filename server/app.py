@@ -3,15 +3,24 @@
 import os
 from pathlib import Path
 
-# Automatically load .env if present
-env_file = Path(__file__).resolve().parent.parent / ".env"
+# Automatically load .env and service-account.json if present
+root_dir = Path(__file__).resolve().parent.parent
+sa_file = root_dir / "service-account.json"
+if sa_file.exists():
+    with open(sa_file, "r", encoding="utf-8") as f:
+        os.environ["FIREBASE_SA_JSON"] = f.read()
+
+env_file = root_dir / ".env"
 if env_file.exists():
+    import re
     with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+        content = f.read()
+    # Match KEY=VALUE where VALUE can be single/double quoted multi-line or single line
+    for match in re.finditer(r'^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=(?:\'([^\']*)\'|"([^"]*)"|([^\r\n#]*))', content, re.MULTILINE):
+        key = match.group(1)
+        val = match.group(2) if match.group(2) is not None else (match.group(3) if match.group(3) is not None else match.group(4))
+        if val is not None:
+            os.environ.setdefault(key, val.strip())
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
